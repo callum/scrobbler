@@ -1,0 +1,26 @@
+{
+  "name": "scrobbler",
+  "version": "0.0.0",
+  "description": "A minimal Last.fm scrobbler",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron main.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/callum/scrobbler.git"
+  },
+  "author": "Callum Jefferies",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/callum/scrobbler/issues"
+  },
+  "homepage": "https://github.com/callum/scrobbler#readme",
+  "devDependencies": {
+    "electron-prebuilt": "^0.36.0"
+  },
+  "dependencies": {
+    "lastfmapi": "0.0.6",
+    "playback": "^0.2.0"
+  }
+}
