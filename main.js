@@ -1,121 +1,112 @@
-'use strict'
-
-const fs = require('fs')
 const electron = require('electron')
-const playback = require('playback')
 const LastFm = require('lastfmapi')
-const app = electron.app
-const shell = electron.shell
-const BrowserWindow = electron.BrowserWindow
+const jobs = require('level-jobs')
+const auth = require('./lib/auth')
+const db = require('./lib/db')
+const Loop = require('./lib/loop')
+const Status = require('./lib/status')
 const Menu = electron.Menu
 const Tray = electron.Tray
+const app = electron.app
+const powerSaveBlocker = electron.powerSaveBlocker
+const shell = electron.shell
 
 const client = new LastFm(require('./config.json'))
+const queue = jobs(db, worker, {
+  backoff: { initialDelay: 5000, maxDelay: 10000 }
+})
+function worker (track, cb) {
+  if (auth.isLoggedIn(client)) client.track.scrobble(track, cb)
+}
 
-let tray
+var suspendId
 
+const loop = Loop()
+loop.on('start', preventSuspension)
+loop.on('stop', resetSuspension)
+loop.on('complete', function (track, updatedAt) {
+  queue.push({
+    track: track.name,
+    artist: track.artist,
+    timestamp: Math.floor(updatedAt / 1000)
+  })
+})
+
+const status = Status()
+status.on('play', loop.start.bind(loop))
+status.on('pause', loop.stop.bind(loop))
+status.on('stop', loop.reset.bind(loop))
+status.on('halt', loop.reset.bind(loop))
+status.on('track', function (track) {
+  if (auth.isLoggedIn(client)) {
+    client.track.updateNowPlaying({ track: track.name, artist: track.artist })
+  }
+  loop.update(track)
+})
+status.start()
+
+var tray
 app.on('ready', function () {
   app.dock.hide()
-
   tray = new Tray('icon.png')
-
-  setContextMenu([quit()])
-
-  auth(function (username) {
-    setContextMenu([
-      profile(username),
-      { type: 'separator' },
-      quit()
-    ])
-
-    playback.on('playing', function (track) {
-      setContextMenu([
-        { label: `${track.name} - ${track.artist}`, enabled: false },
-        { type: 'separator' },
-        profile(username),
-        { type: 'separator' },
-        quit()
-      ])
-
-      const params = {
-        track: track.name,
-        artist: track.artist,
-        timestamp: Math.floor(Date.now() / 1000)
-      }
-
-      client.track.updateNowPlaying(params, function (err, res) {
-        if (err) throw err
-      })
-
-      client.track.scrobble(params, function (err, res) {
-        if (err) throw err
-      })
-    })
-  })
+  setLoggedOutMenu()
+  initialize()
 })
 
 app.on('window-all-closed', function (event) {
   event.preventDefault()
 })
 
-function auth (callback) {
-  const path = __dirname + '/.scrobbler'
-  let session
+function openProfile (username) {
+  shell.openExternal(`http://last.fm/user/${username}`)
+}
 
-  try {
-    session = JSON.parse(fs.readFileSync(path, 'utf8'))
-  } catch (err) {
-    console.log('Session not found')
-  }
-
-  if (session) {
-    client.setSessionCredentials(session.username, session.key)
-    return callback(session.username)
-  }
-
-  getToken(function (token) {
-    client.authenticate(token, function (err, session) {
-      if (err) throw err
-
-      fs.writeFileSync(path, JSON.stringify({
-        username: session.username,
-        key: session.key
-      }))
-
-      callback(session.username)
-    })
+function initialize () {
+  auth.login(client, db, function (_, session) {
+    status.start()
+    setLoggedInMenu(session)
   })
 }
 
-function getToken (callback) {
-  let dialog = new BrowserWindow({ width: 1024, height: 600 })
-  dialog.loadURL(client.getAuthenticationUrl({ cb: 'http://example.com/' }))
-
-  dialog.webContents.on('will-navigate', function (event, location) {
-    const match = location.match(/^http:\/\/example\.com\/\?token=(\w+)$/)
-
-    if (match) {
-      dialog.close()
-      dialog = null
-      callback(match[1])
-    }
+function terminate () {
+  auth.logout(client, db, function () {
+    status.stop()
+    loop.stop()
+    setLoggedOutMenu()
   })
 }
 
-function setContextMenu (template) {
-  const contextMenu = Menu.buildFromTemplate(template)
-  tray.setContextMenu(contextMenu)
-}
-
-function profile (username) {
-  return {
-    label: 'Last.fm profile',
-    click () {
-      shell.openExternal(`http://last.fm/user/${username}`)
-    }
+function preventSuspension () {
+  if (typeof suspendId === 'undefined') {
+    suspendId = powerSaveBlocker.start('prevent-app-suspension')
   }
 }
 
-function quit () {
-  return { label: 'Quit', click: app.quit }
+function resetSuspension () {
+  if (typeof suspendId !== 'undefined') {
+    powerSaveBlocker.stop(suspendId)
+    suspendId = undefined
+  }
+}
+
+function setLoggedInMenu (session) {
+  setMenu([
+    { label: 'Last.fm profile',
+      click: openProfile.bind(null, session.username) },
+    { type: 'separator' },
+    { label: 'Logout', click: terminate },
+    { type: 'separator' },
+    { label: 'Quit', click: app.quit }
+  ])
+}
+
+function setLoggedOutMenu () {
+  setMenu([
+    { label: 'Login', click: initialize },
+    { label: 'Quit', click: app.quit }
+  ])
+}
+
+function setMenu (template) {
+  tray.setContextMenu(Menu.buildFromTemplate(template))
 }
